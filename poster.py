@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Shayari Instagram Bot v5.6 (ElevenLabs + Edge-TTS Fallback)
-- Real authentic Shayari via Gemini 2.5 Flash
+- Real authentic Shayari via Gemini 3.5 Flash
 - Dynamic cross-fallback media engine for Photos & Reels (Unsplash <-> Pexels)
 - Cinematic TTS via ElevenLabs API (with Edge-TTS Failover)
 - Pillow ANTIALIAS monkeypatch for MoviePy compatibility
@@ -111,7 +111,7 @@ def generate_content(poet: dict) -> dict:
         "}"
     )
 
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    response = client.models.generate_content(model="gemini-3.5-flash", contents=prompt)
     raw = response.text.strip().replace("```json","").replace("```","").strip()
     data = json.loads(raw)
     print(f"✅ Generated Sher successfully: {data.get('sher_roman', '')[:40]}...")
