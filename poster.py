@@ -477,23 +477,38 @@ def post_to_instagram(media_path: str, caption: str, is_video: bool = False) -> 
         else:
             payload["image_url"] = media_url
 
+        print(f"📡 Creating Instagram Media Container...")
         c_res = requests.post(f"https://graph.instagram.com/v21.0/{INSTAGRAM_USER_ID}/media", data=payload).json()
         container_id = c_res.get("id")
         if not container_id: 
-            print(f"❌ Instagram Error: {c_res}")
+            print(f"❌ Instagram Container Error: {c_res}")
             return False
 
         if is_video:
+            print(f"⏳ Waiting for Instagram to process Reel (ID: {container_id})...")
             for attempt in range(1, 21):
                 time.sleep(10)
-                status = requests.get(f"https://graph.instagram.com/v21.0/{container_id}?fields=status_code&access_token={INSTAGRAM_ACCESS_TOKEN}").json()
-                if status.get("status_code") == "FINISHED": break
-                elif status.get("status_code") == "ERROR": return False
+                status_res = requests.get(f"https://graph.instagram.com/v21.0/{container_id}?fields=status_code,status&access_token={INSTAGRAM_ACCESS_TOKEN}").json()
+                status_code = status_res.get("status_code")
+                print(f"   ↳ Attempt {attempt}: {status_code}")
+                
+                if status_code == "FINISHED": 
+                    break
+                elif status_code == "ERROR": 
+                    print(f"❌ Instagram Processing Error: {status_res}")
+                    return False
         else:
             time.sleep(15)
 
+        print(f"🚀 Publishing Container to Instagram...")
         p_res = requests.post(f"https://graph.instagram.com/v21.0/{INSTAGRAM_USER_ID}/media_publish", data={"creation_id": container_id, "access_token": INSTAGRAM_ACCESS_TOKEN}).json()
-        return "id" in p_res
+        
+        if "id" in p_res:
+            print(f"✅ Published successfully! Post ID: {p_res['id']}")
+            return True
+        else:
+            print(f"❌ Instagram Publish Error: {p_res}")
+            return False
         
     except RuntimeError as re:
         print(f"❌ Media Upload Error: {re}")
