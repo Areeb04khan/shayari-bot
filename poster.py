@@ -41,7 +41,17 @@ UNSPLASH_ACCESS_KEY    = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 POST_TYPE              = os.environ.get("POST_TYPE", "photo").lower()
 IG_HANDLE              = "@ak_apak"
 
-REQUIRED_ENV_VARS = ["INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_USER_ID"]
+# --- NEW: free, reliable media host (replaces envs.sh / 0x0.st) ---------
+# GITHUB_TOKEN: the auto-generated Actions token (NOT a secret you create
+#   yourself). It costs nothing and needs no sign-up -- we just have to
+#   pass it into this step's `env:` block in main.yml (done below).
+# GITHUB_REPOSITORY: set automatically by GitHub Actions on every run as
+#   "owner/repo", e.g. "Areeb04khan/shayari-bot". Nothing to configure.
+GITHUB_TOKEN            = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPOSITORY       = os.environ.get("GITHUB_REPOSITORY", "")
+MEDIA_RELEASE_TAG        = "media-cache"  # fixed tag we reuse every run purely as free file storage
+
+REQUIRED_ENV_VARS = ["INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_USER_ID", "GITHUB_TOKEN"]
 
 def validate_environment():
     missing = [name for name in REQUIRED_ENV_VARS if not os.environ.get(name)]
@@ -431,41 +441,112 @@ def create_reel_video(data: dict, poet: dict, tts_paths: list) -> str:
         return None
 
 # ============================================================
-# DUAL-HOST MEDIA UPLOADER
+# MEDIA UPLOADER  (GitHub Releases — free, no sign-up, no new secrets)
 # ============================================================
-def upload_public_media(path: str) -> str:
-    print(f"☁️ [1/2] Uploading to Primary Host (envs.sh)...")
-    try:
-        with open(path, "rb") as f:
-            res = requests.post("https://envs.sh", files={"file": f}, timeout=60)
-        if res.status_code == 200 and res.text.startswith("http"):
-            url = res.text.strip()
-            print(f"✅ Hosted securely at: {url}")
-            return url
-        print(f"⚠️ Primary Host Failed (Status: {res.status_code}): {res.text[:100]}")
-    except Exception as e:
-        print(f"⚠️ Primary Host Exception: {e}")
+# WHY THIS CHANGED:
+#   envs.sh started failing DNS lookups, and 0x0.st has PERMANENTLY turned
+#   off anonymous uploads (it told us so in the error: "uploads disabled
+#   because it's been almost nothing but AI botnet spam"). Both were free
+#   anonymous hosts with no guarantee they'd keep working -- exactly what
+#   just happened. Instead, we now upload the photo/reel as an asset on a
+#   GitHub "Release" in this SAME repo. That gives us a real, stable public
+#   URL (a github.com / githubusercontent.com link) that Instagram's
+#   servers can fetch -- and it's 100% free with your existing GitHub
+#   account, since it's your own repo. No new account, no API key, no cost.
+#
+#   We reuse one fixed release (tagged "media-cache") as scratch space, and
+#   delete each file right after Instagram has fetched it (see
+#   delete_public_media below), so this never piles up storage over time.
 
-    print(f"☁️ [2/2] Uploading to Fallback Host (0x0.st)...")
+def _gh_headers() -> dict:
+    """Standard headers GitHub's API expects on every request."""
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+def get_or_create_media_release() -> dict:
+    """
+    Finds our dedicated 'media-cache' Release. If it doesn't exist yet
+    (e.g. first time this fix runs), creates it automatically -- nothing
+    for you to set up by hand on github.com.
+    """
+    api_base = f"https://api.github.com/repos/{GITHUB_REPOSITORY}"
+
+    # Step 1: does it already exist? (After the very first run, it will.)
+    res = requests.get(f"{api_base}/releases/tags/{MEDIA_RELEASE_TAG}", headers=_gh_headers(), timeout=15)
+    if res.status_code == 200:
+        return res.json()
+
+    # Step 2: create it. "prerelease: True" + "make_latest: false" keep it
+    # from ever showing up as your repo's "Latest release" badge -- it's
+    # just storage, not a real software release.
+    print("ℹ️ First run: creating one-time 'media-cache' Release for hosting...")
+    res = requests.post(
+        f"{api_base}/releases",
+        headers=_gh_headers(),
+        timeout=15,
+        json={
+            "tag_name": MEDIA_RELEASE_TAG,
+            "name": "Media Cache (auto-managed, safe to ignore)",
+            "body": "Used by poster.py as free temporary file storage so Instagram can fetch photos/reels. Files here are deleted right after each post.",
+            "prerelease": True,
+            "make_latest": "false",
+        },
+    )
+    res.raise_for_status()  # if this fails, the error below tells us exactly why
+    return res.json()
+
+def upload_public_media(path: str) -> tuple:
+    """
+    Uploads one file to the media-cache Release.
+    Returns (public_url, asset_id) -- asset_id is kept so we can delete
+    the file again once Instagram is done with it.
+    """
+    release = get_or_create_media_release()
+    filename = os.path.basename(path)
+    content_type = "video/mp4" if filename.endswith(".mp4") else "image/jpeg"
+
+    print(f"☁️ Uploading {filename} to GitHub Release (free host)...")
+    upload_url = f"https://uploads.github.com/repos/{GITHUB_REPOSITORY}/releases/{release['id']}/assets"
+    with open(path, "rb") as f:
+        res = requests.post(
+            upload_url,
+            headers={**_gh_headers(), "Content-Type": content_type},
+            params={"name": filename},   # asset filename; using our unique timestamped name avoids clashes
+            data=f,                      # raw file bytes, not multipart -- this endpoint expects that
+            timeout=120,
+        )
+    res.raise_for_status()
+    asset = res.json()
+    url = asset["browser_download_url"]
+    print(f"✅ Hosted at: {url}")
+    return url, asset["id"]
+
+def delete_public_media(asset_id: int) -> None:
+    """
+    Best-effort cleanup: removes the file from the Release now that
+    Instagram has already fetched it, so the repo doesn't slowly fill up
+    with old reels/photos. If this ever fails, we just print a warning --
+    it's not worth failing an otherwise-successful post over housekeeping.
+    """
     try:
-        with open(path, "rb") as f:
-            res = requests.post("https://0x0.st", files={"file": f}, timeout=60)
-        if res.status_code == 200 and res.text.startswith("http"):
-            url = res.text.strip()
-            print(f"✅ Hosted securely at: {url}")
-            return url
-        print(f"⚠️ Fallback Host Failed (Status: {res.status_code}): {res.text[:100]}")
+        requests.delete(
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/assets/{asset_id}",
+            headers=_gh_headers(),
+            timeout=15,
+        )
     except Exception as e:
-        print(f"⚠️ Fallback Host Exception: {e}")
-        
-    raise RuntimeError("All public media hosts failed to return a valid URL.")
+        print(f"⚠️ Cleanup warning: couldn't delete temp media (asset {asset_id}): {e}")
     
 # ============================================================
 # INSTAGRAM PUBLISHER
 # ============================================================
 def post_to_instagram(media_path: str, caption: str, is_video: bool = False) -> bool:
+    asset_id = None  # tracks the uploaded file so we can delete it in `finally` below
     try:
-        media_url = upload_public_media(media_path)
+        media_url, asset_id = upload_public_media(media_path)
         payload = {"access_token": INSTAGRAM_ACCESS_TOKEN, "caption": caption}
         if is_video:
             payload["media_type"] = "REELS"
@@ -506,12 +587,16 @@ def post_to_instagram(media_path: str, caption: str, is_video: bool = False) -> 
             print(f"❌ Instagram Publish Error: {p_res}")
             return False
         
-    except RuntimeError as re:
-        print(f"❌ Media Upload Error: {re}")
-        return False
     except Exception as e:
-        print(f"❌ Instagram Graph API Failure: {e}")
+        print(f"❌ Instagram Graph API / Upload Failure: {e}")
         return False
+    finally:
+        # Runs no matter what -- success, failure, or early "return False"
+        # above. Instagram only needs the URL for a short window while it
+        # fetches the file, so it's safe to remove right after this
+        # function is done trying.
+        if asset_id:
+            delete_public_media(asset_id)
 
 def load_progress() -> dict:
     if os.path.exists("progress.json"):
