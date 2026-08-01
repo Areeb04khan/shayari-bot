@@ -436,6 +436,9 @@ def create_reel_video(data: dict, poet: dict, tts_paths: list) -> str:
 # ============================================================
 # DUAL-HOST MEDIA UPLOADER
 # ============================================================
+# ============================================================
+# DUAL-HOST MEDIA UPLOADER
+# ============================================================
 def upload_public_media(path: str) -> str:
     print(f"☁️ [1/2] Uploading to Primary Host (tmpfiles.org)...")
     try:
@@ -453,7 +456,7 @@ def upload_public_media(path: str) -> str:
 
     print(f"☁️ [2/2] Uploading to Fallback Host (tempfile.org)...")
     try:
-       with open(path, "rb") as f:
+        with open(path, "rb") as f:
             res = requests.post("https://tempfile.org/api/upload/local", files={"files": (os.path.basename(path), f)}, timeout=60)
         if res.status_code == 200:
             data = res.json()
@@ -466,6 +469,7 @@ def upload_public_media(path: str) -> str:
         print(f"⚠️ Fallback Host Exception: {e}")
         
     raise RuntimeError("All public media hosts failed to return a valid URL.")
+
 
 # ============================================================
 # INSTAGRAM PUBLISHER
