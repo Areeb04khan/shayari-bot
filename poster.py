@@ -523,7 +523,6 @@ def run():
     if POST_TYPE == "photo":
         img_path = create_photo_image(data, poet)
         success = post_to_instagram(img_path, caption, is_video=False)
-        if success: p["poet_index"] += 1
     elif POST_TYPE == "reel":
         os.makedirs("output", exist_ok=True)
         tts_paths = generate_tts(data)
@@ -534,6 +533,7 @@ def run():
 
     if success:
         p["total_posts"] += 1
+        p["poet_index"] += 1  # 👈 This ensures every single post generates brand new content!
         save_progress(p)
         print("\n✅ WORKFLOW COMPLETED SUCCESSFULLY!")
     else:
