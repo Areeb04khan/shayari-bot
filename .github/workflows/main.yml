@@ -35,11 +35,12 @@ jobs:
           sudo apt-get install -y fonts-dejavu-core fonts-dejavu-extra ffmpeg
           fc-cache -f -v
 
-      - name: Install Python dependencies
+            - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip uninstall -y google-generativeai
-          pip install google-genai requests pillow moviepy==1.0.3 numpy elevenlabs edge-tts asyncio
+          pip install google-genai requests pillow moviepy==1.0.3 numpy elevenlabs edge-tts asyncio openai
+
 
       - name: Restore progress
         uses: actions/cache@v4
