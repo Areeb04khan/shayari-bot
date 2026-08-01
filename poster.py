@@ -434,36 +434,32 @@ def create_reel_video(data: dict, poet: dict, tts_paths: list) -> str:
 # DUAL-HOST MEDIA UPLOADER
 # ============================================================
 def upload_public_media(path: str) -> str:
-    print(f"☁️ [1/2] Uploading to Primary Host (tmpfiles.org)...")
+    print(f"☁️ [1/2] Uploading to Primary Host (envs.sh)...")
     try:
         with open(path, "rb") as f:
-            res = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f}, timeout=60)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("status") == "success":
-                url = data["data"]["url"].replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                print(f"✅ Hosted securely at: {url}")
-                return url
-        print(f"⚠️ Primary Host Failed (Status: {res.status_code})")
+            res = requests.post("https://envs.sh", files={"file": f}, timeout=60)
+        if res.status_code == 200 and res.text.startswith("http"):
+            url = res.text.strip()
+            print(f"✅ Hosted securely at: {url}")
+            return url
+        print(f"⚠️ Primary Host Failed (Status: {res.status_code}): {res.text[:100]}")
     except Exception as e:
         print(f"⚠️ Primary Host Exception: {e}")
 
-    print(f"☁️ [2/2] Uploading to Fallback Host (tempfile.org)...")
+    print(f"☁️ [2/2] Uploading to Fallback Host (0x0.st)...")
     try:
         with open(path, "rb") as f:
-            res = requests.post("https://tempfile.org/api/upload/local", files={"files": (os.path.basename(path), f)}, timeout=60)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("success"):
-                url = f"{data['files'][0]['url'].rstrip('/')}/download"
-                print(f"✅ Hosted securely at: {url}")
-                return url
-        print(f"⚠️ Fallback Host Failed (Status: {res.status_code})")
+            res = requests.post("https://0x0.st", files={"file": f}, timeout=60)
+        if res.status_code == 200 and res.text.startswith("http"):
+            url = res.text.strip()
+            print(f"✅ Hosted securely at: {url}")
+            return url
+        print(f"⚠️ Fallback Host Failed (Status: {res.status_code}): {res.text[:100]}")
     except Exception as e:
         print(f"⚠️ Fallback Host Exception: {e}")
         
     raise RuntimeError("All public media hosts failed to return a valid URL.")
-
+    
 # ============================================================
 # INSTAGRAM PUBLISHER
 # ============================================================
