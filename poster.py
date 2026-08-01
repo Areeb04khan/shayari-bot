@@ -1,21 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Shayari Instagram Bot v5.6 (ElevenLabs + Edge-TTS Fallback)
-- Real authentic Shayari via Gemini 3.5 Flash
-- Dynamic cross-fallback media engine for Photos & Reels (Unsplash <-> Pexels)
-- Cinematic TTS via ElevenLabs API (with Edge-TTS Failover)
-- Pillow ANTIALIAS monkeypatch for MoviePy compatibility
-- Unbuffered execution for transparent GitHub Actions logging
+Instagram Shayari Bot v6.1 (Multi-Tier Failover Engine)
+- AI Chain: Gemini -> OpenRouter -> Groq -> NVIDIA NIM
+- TTS Chain: ElevenLabs -> OpenRouter TTS -> Edge-TTS (Urdu)
+- Media Host Chain: tmpfiles.org -> tempfile.org
 """
 
-# ============================================================
-# PILLOW MONKEYPATCH (Fixes MoviePy 'Image has no attribute ANTIALIAS')
-# ============================================================
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = getattr(PIL.Image, 'Resampling', PIL.Image).LANCZOS
 
 from google import genai
+from google.genai import types
+from openai import OpenAI
 import requests
 import json
 import os
@@ -25,31 +22,34 @@ import textwrap
 import random
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
-from urllib.parse import urlparse
 
-# Ensure unbuffered stdout for GitHub Actions logs
 sys.stdout.reconfigure(line_buffering=True)
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION & ENVIRONMENT
 # ============================================================
 GEMINI_API_KEY         = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY     = os.environ.get("OPENROUTER_API_KEY", "")
+GROQ_API_KEY           = os.environ.get("GROQ_API_KEY", "")
+NVIDIA_API_KEY         = os.environ.get("NVIDIA_API_KEY", "")
+ELEVENLABS_API_KEY     = os.environ.get("ELEVENLABS_API_KEY", "")
+
 INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
 INSTAGRAM_USER_ID      = os.environ.get("INSTAGRAM_USER_ID", "")
 PEXELS_API_KEY         = os.environ.get("PEXELS_API_KEY", "")
 UNSPLASH_ACCESS_KEY    = os.environ.get("UNSPLASH_ACCESS_KEY", "")
-ELEVENLABS_API_KEY     = os.environ.get("ELEVENLABS_API_KEY", "")
-MEDIA_HOST             = os.environ.get("MEDIA_HOST", "tempfile").lower()
-CLOUDINARY_URL         = os.environ.get("CLOUDINARY_URL", "")
 POST_TYPE              = os.environ.get("POST_TYPE", "photo").lower()
 IG_HANDLE              = "@ak_apak"
 
-REQUIRED_ENV_VARS = ["GEMINI_API_KEY", "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_USER_ID"]
+REQUIRED_ENV_VARS = ["INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_USER_ID"]
 
 def validate_environment():
     missing = [name for name in REQUIRED_ENV_VARS if not os.environ.get(name)]
     if missing:
         print(f"❌ FATAL: Missing required secret(s): {', '.join(missing)}")
+        sys.exit(1)
+    if not any([GEMINI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY]):
+        print("❌ FATAL: At least one AI API key must be provided!")
         sys.exit(1)
 
 FONT_SERIF  = "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"
@@ -82,13 +82,10 @@ VIRAL_HOOKS = [
 ]
 
 # ============================================================
-# STEP 1: Gemini AI Content Generator
+# MULTI-TIER AI CONTENT GENERATOR (Failover Chain)
 # ============================================================
 def generate_content(poet: dict) -> dict:
-    print(f"🧠 Querying Gemini AI for poet: {poet['name']}...")
-    client = genai.Client(api_key=GEMINI_API_KEY)
     hook = random.choice(VIRAL_HOOKS).format(poet_name=poet['name'])
-
     prompt = (
         f"You run a high-engagement Instagram Shayari page.\n"
         f"Poet: {poet['name']} ({poet['era']})\n\n"
@@ -97,7 +94,7 @@ def generate_content(poet: dict) -> dict:
         "2. Roman Urdu transliteration (sher_roman) - MAX 2 lines.\n"
         "3. Exact Urdu script (sher_urdu) for audio synthesis.\n"
         "4. Poetic English translation (english_translation) - MAX 1 line.\n"
-        "5. Search query (search_query) for dark aesthetic background imagery (e.g., 'dark rain night', 'misty road', 'coffee shadow', 'vintage book').\n"
+        "5. Search query (search_query) for dark aesthetic background imagery (e.g., 'dark rain night', 'misty road').\n"
         "6. Short caption story.\n\n"
         "Return ONLY valid JSON:\n"
         "{\n"
@@ -111,20 +108,60 @@ def generate_content(poet: dict) -> dict:
         "}"
     )
 
-    response = client.models.generate_content(model="gemini-3.5-flash", contents=prompt)
-    raw = response.text.strip().replace("```json","").replace("```","").strip()
-    data = json.loads(raw)
-    print(f"✅ Generated Sher successfully: {data.get('sher_roman', '')[:40]}...")
-    return data
+    if GEMINI_API_KEY:
+        try:
+            print(f"🧠 [1/4] Querying Gemini AI for poet: {poet['name']}...")
+            client = genai.Client(
+                api_key=GEMINI_API_KEY,
+                http_options=types.HttpOptions(
+                    retry_options=types.HttpRetryOptions(attempts=1)
+                )
+            )
+            response = client.models.generate_content(
+                model="gemini-3.5-flash", 
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.7)
+            )
+            raw = response.text.strip().replace("```json","").replace("```","").strip()
+            data = json.loads(raw)
+            print("✅ Generated Sher successfully via Gemini!")
+            return data
+        except Exception as e:
+            print(f"⚠️ Gemini failed ({e}). Moving to Fallback Chain...")
+
+    fallbacks = [
+        {"name": "OpenRouter", "api_key": OPENROUTER_API_KEY, "base_url": "https://openrouter.ai/api/v1", "model": "openrouter/free"},
+        {"name": "Groq", "api_key": GROQ_API_KEY, "base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
+        {"name": "NVIDIA NIM", "api_key": NVIDIA_API_KEY, "base_url": "https://integrate.api.nvidia.com/v1", "model": "meta/llama-3.1-70b-instruct"}
+    ]
+
+    for index, provider in enumerate(fallbacks, start=2):
+        if not provider["api_key"]:
+            continue
+        try:
+            print(f"🔄 [{index}/4] Trying {provider['name']} Fallback...")
+            client = OpenAI(base_url=provider["base_url"], api_key=provider["api_key"])
+            response = client.chat.completions.create(
+                model=provider["model"],
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            raw = response.choices[0].message.content.strip().replace("```json","").replace("```","").strip()
+            data = json.loads(raw)
+            print(f"✅ Generated Sher successfully via {provider['name']}!")
+            return data
+        except Exception as err:
+            print(f"⚠️ {provider['name']} failed: {err}")
+
+    print("❌ FATAL: All AI providers failed.")
+    sys.exit(1)
 
 # ============================================================
-# STEP 2: Dual Media Engine (Unsplash + Pexels Cross-Fallback)
+# MEDIA ENGINE (Unsplash + Pexels)
 # ============================================================
 def fetch_unsplash_photo(query: str) -> str:
-    if not UNSPLASH_ACCESS_KEY:
-        return None
+    if not UNSPLASH_ACCESS_KEY: return None
     try:
-        print(f"📷 Fetching photo from Unsplash: '{query}'...")
         headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
         url = f"https://api.unsplash.com/photos/random?query={query}&orientation=squarish"
         res = requests.get(url, headers=headers, timeout=10)
@@ -134,17 +171,14 @@ def fetch_unsplash_photo(query: str) -> str:
                 p_path = f"output/unsplash_{int(time.time())}.jpg"
                 with open(p_path, "wb") as f:
                     f.write(requests.get(img_url, timeout=30).content)
-                print(f"✅ Downloaded Unsplash Photo: {p_path}")
                 return p_path
-    except Exception as e:
-        print(f"⚠️ Unsplash photo fetch error: {e}")
+    except Exception:
+        pass
     return None
 
 def fetch_pexels_photo(query: str) -> str:
-    if not PEXELS_API_KEY:
-        return None
+    if not PEXELS_API_KEY: return None
     try:
-        print(f"📷 Fetching photo from Pexels: '{query}'...")
         headers = {"Authorization": PEXELS_API_KEY}
         url = f"https://api.pexels.com/v1/search?query={query}&orientation=square&per_page=5"
         res = requests.get(url, headers=headers, timeout=10)
@@ -156,30 +190,21 @@ def fetch_pexels_photo(query: str) -> str:
                     p_path = f"output/pexels_img_{int(time.time())}.jpg"
                     with open(p_path, "wb") as f:
                         f.write(requests.get(img_url, timeout=30).content)
-                    print(f"✅ Downloaded Pexels Photo: {p_path}")
                     return p_path
-    except Exception as e:
-        print(f"⚠️ Pexels photo fetch error: {e}")
+    except Exception:
+        pass
     return None
 
 def get_photo_background(query: str) -> str:
     os.makedirs("output", exist_ok=True)
-    providers = [fetch_unsplash_photo, fetch_pexels_photo]
-    random.shuffle(providers)
-
-    for fetch_func in providers:
-        img_path = fetch_func(query)
-        if img_path and os.path.exists(img_path):
-            return img_path
-
-    print("ℹ️ Both Unsplash and Pexels failed for photo. Using dark solid background fallback.")
+    for fetch_func in [fetch_unsplash_photo, fetch_pexels_photo]:
+        path = fetch_func(query)
+        if path and os.path.exists(path): return path
     return None
 
 def fetch_pexels_video(query: str) -> str:
-    if not PEXELS_API_KEY:
-        return None
+    if not PEXELS_API_KEY: return None
     try:
-        print(f"🎬 Fetching video from Pexels: '{query}'...")
         headers = {"Authorization": PEXELS_API_KEY}
         url = f"https://api.pexels.com/videos/search?query={query}&orientation=portrait&per_page=5"
         res = requests.get(url, headers=headers, timeout=10)
@@ -192,17 +217,14 @@ def fetch_pexels_video(query: str) -> str:
                         v_path = f"output/pexels_vid_{int(time.time())}.mp4"
                         with open(v_path, "wb") as f:
                             f.write(requests.get(vf["link"], timeout=30).content)
-                        print(f"✅ Downloaded Pexels Video: {v_path}")
                         return v_path
-    except Exception as e:
-        print(f"⚠️ Pexels video fetch error: {e}")
+    except Exception:
+        pass
     return None
 
 def fetch_unsplash_video_equivalent(query: str) -> str:
-    if not UNSPLASH_ACCESS_KEY:
-        return None
+    if not UNSPLASH_ACCESS_KEY: return None
     try:
-        print(f"🎬 Fetching vertical image from Unsplash for Reel: '{query}'...")
         headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
         url = f"https://api.unsplash.com/photos/random?query={query}&orientation=portrait"
         res = requests.get(url, headers=headers, timeout=10)
@@ -212,50 +234,36 @@ def fetch_unsplash_video_equivalent(query: str) -> str:
                 p_path = f"output/unsplash_portrait_{int(time.time())}.jpg"
                 with open(p_path, "wb") as f:
                     f.write(requests.get(img_url, timeout=30).content)
-                print(f"✅ Downloaded Unsplash Portrait Image for Reel: {p_path}")
                 return p_path
-    except Exception as e:
-        print(f"⚠️ Unsplash vertical image fetch error: {e}")
+    except Exception:
+        pass
     return None
 
 def get_reel_background(query: str) -> tuple:
     os.makedirs("output", exist_ok=True)
-    choice = random.choice(["pexels", "unsplash"])
-
-    if choice == "pexels":
-        v_path = fetch_pexels_video(query)
-        if v_path: return (v_path, True)
-        u_path = fetch_unsplash_video_equivalent(query)
-        if u_path: return (u_path, False)
-    else:
-        u_path = fetch_unsplash_video_equivalent(query)
-        if u_path: return (u_path, False)
-        v_path = fetch_pexels_video(query)
-        if v_path: return (v_path, True)
-
-    print("ℹ️ Both video sources failed. Using clean dark canvas fallback.")
+    v_path = fetch_pexels_video(query)
+    if v_path: return (v_path, True)
+    u_path = fetch_unsplash_video_equivalent(query)
+    if u_path: return (u_path, False)
     return (None, False)
 
 # ============================================================
-# STEP 3: Photo Renderer (1080x1080)
+# PHOTO COMPOSITOR
 # ============================================================
 def create_photo_image(data: dict, poet: dict) -> str:
     print("🎨 Rendering 1080x1080 Photo Image...")
     W, H = 1080, 1080
     palette = EMOTION_PALETTES.get(data.get("emotion","dard"), DEFAULT_PALETTE)
-
     bg_photo_path = get_photo_background(data.get("search_query", "dark rain"))
 
     if bg_photo_path and os.path.exists(bg_photo_path):
-        base_img = Image.open(bg_photo_path).convert("RGBA")
-        base_img = base_img.resize((W, H), Image.Resampling.LANCZOS)
+        base_img = Image.open(bg_photo_path).convert("RGBA").resize((W, H), Image.Resampling.LANCZOS)
         dark_overlay = Image.new("RGBA", (W, H), (10, 10, 20, 160))
         img = Image.alpha_composite(base_img, dark_overlay).convert("RGB")
     else:
         img = Image.new("RGB", (W, H), color=palette["bg"])
 
     draw = ImageDraw.Draw(img)
-
     try:
         font_poet  = ImageFont.truetype(FONT_SERIF, 32)
         font_sher  = ImageFont.truetype(FONT_SERIF, 44)
@@ -270,7 +278,6 @@ def create_photo_image(data: dict, poet: dict) -> str:
         draw.text(((W - tw) / 2, y), text, font=font, fill=color)
 
     center(f"-- {poet['name']} --", 120, font_poet, "#E0C080")
-    
     lines = data["sher_roman"].strip().split("\n")
     y_pos = 380
     for line in lines:
@@ -284,108 +291,98 @@ def create_photo_image(data: dict, poet: dict) -> str:
         y_pos += 35
 
     center(IG_HANDLE, 960, font_brand, "#AAAAAA")
-
     fname = f"output/photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
     img.save(fname, "JPEG", quality=95)
-    print(f"✅ Photo rendered at: {fname}")
     return fname
 
 # ============================================================
-# ============================================================
-# STEP 4: Audio Engine (ElevenLabs -> Edge-TTS Fallback)
+# MULTI-TIER TTS FAILOVER ENGINE (Urdu)
 # ============================================================
 def generate_tts(data: dict) -> list:
-    """Generates separate audio files for each line to guarantee dramatic pauses."""
-    
-    # 1. Define the lines FIRST (This was missing!)
     lines = [line.strip() for line in data["sher_urdu"].split("\n") if line.strip()]
-    if len(lines) < 2:
-        lines = [data["sher_urdu"]]
-        
+    if not lines: lines = [data["sher_urdu"]]
     output_paths = []
-    
-    # --- PRIMARY: ELEVENLABS ---
+
+    # Tier 1: ElevenLabs
     if ELEVENLABS_API_KEY:
         try:
-            print("🎙️ Attempting Cinematic ElevenLabs Audio (Native Urdu Script)...")
+            print("🎙️ [TTS 1/3] Trying ElevenLabs...")
             from elevenlabs.client import ElevenLabs
-            
             client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-            
             for i, line in enumerate(lines):
                 out_path = f"output/tts_line_{i}_{int(time.time())}.mp3"
-                
                 audio_stream = client.text_to_speech.convert(
-                    text=line,
-                    voice_id="N2lVS1w4EtoT3dr4eOWO", # Callum Voice ID
-                    model_id="eleven_multilingual_v2",
-                    output_format="mp3_44100_128"
+                    text=line, voice_id="N2lVS1w4EtoT3dr4eOWO",
+                    model_id="eleven_multilingual_v2", output_format="mp3_44100_128"
                 )
-                
                 with open(out_path, "wb") as f:
                     for chunk in audio_stream:
-                        if chunk:
-                            f.write(chunk)
-                            
+                        if chunk: f.write(chunk)
                 output_paths.append(out_path)
-                
-            print(f"✅ ElevenLabs Audio generated: {len(output_paths)} lines.")
+            print("✅ ElevenLabs Audio generated successfully!")
             return output_paths
-            
         except Exception as e:
-            print(f"⚠️ ElevenLabs Failed ({e}). Falling back to Edge-TTS...")
-            output_paths = [] # Clear paths on failure to trigger fallback
+            print(f"⚠️ ElevenLabs failed ({e}). Moving to OpenRouter TTS...")
 
-    # --- FALLBACK: EDGE-TTS ---
-    print("🎙️ Using Edge-TTS as fallback...")
+    # Tier 2: OpenRouter TTS (Free models)
+    if OPENROUTER_API_KEY:
+        try:
+            print("🎙️ [TTS 2/3] Trying OpenRouter TTS...")
+            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+            for i, line in enumerate(lines):
+                out_path = f"output/tts_line_{i}_{int(time.time())}.mp3"
+                response = client.audio.speech.create(
+                    model="fish-audio/s2.1-pro-free:free",
+                    voice="alloy",
+                    input=line
+                )
+                response.stream_to_file(out_path)
+                output_paths.append(out_path)
+            print("✅ OpenRouter TTS Audio generated successfully!")
+            return output_paths
+        except Exception as e:
+            print(f"⚠️ OpenRouter TTS failed ({e}). Moving to Edge-TTS...")
+
+    # Tier 3: Edge-TTS (Bulletproof local safety net)
     try:
+        print("🎙️ [TTS 3/3] Generating fallback via Edge-TTS...")
         import asyncio
         import edge_tts
-
         async def _speak():
             for i, line in enumerate(lines):
                 out_path = f"output/tts_line_{i}_{int(time.time())}.mp3"
                 communicate = edge_tts.Communicate(line, "ur-PK-AsadNeural", rate="-15%", pitch="-6Hz")
                 await communicate.save(out_path)
                 output_paths.append(out_path)
-
         asyncio.run(_speak())
-        print(f"✅ Edge-TTS Audio generated: {len(output_paths)} lines.")
+        print("✅ Edge-TTS Audio generated successfully!")
         return output_paths
-        
     except Exception as e:
-        print(f"❌ Edge-TTS Audio Generation Failed: {e}")
+        print(f"❌ FATAL: All TTS providers failed: {e}")
         return []
 
-
-# ============================================================# ============================================================
-# STEP 5: Reel Video Studio
+# ============================================================
+# REEL COMPOSITOR
 # ============================================================
 def create_reel_video(data: dict, poet: dict, tts_paths: list) -> str:
     print("🎬 Compositing 1080x1920 Reel Video with MoviePy...")
     try:
-        from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, ImageClip, CompositeAudioClip, concatenate_audioclips
+        from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, ImageClip, concatenate_audioclips
         import numpy as np
 
-        # 1. Stitch Audio Lines with a 1-Second Dramatic Pause
         audio_clips = []
-        
-        # Create a 1-second silent audio clip using the first line as a template
         base_clip = AudioFileClip(tts_paths[0])
-        silence = base_clip.subclip(0, min(0.1, base_clip.duration)).volumex(0) 
-        silence = concatenate_audioclips([silence] * 10) # ~1.0 second silence
-        
+        silence = base_clip.subclip(0, min(0.1, base_clip.duration)).volumex(0)
+        silence = concatenate_audioclips([silence] * 10)
+
         for i, path in enumerate(tts_paths):
             audio_clips.append(AudioFileClip(path))
-            if i < len(tts_paths) - 1:
-                audio_clips.append(silence)
-                
+            if i < len(tts_paths) - 1: audio_clips.append(silence)
+
         tts_audio = concatenate_audioclips(audio_clips)
         duration = min(tts_audio.duration + 3, 30)
 
-        # 2. Background Setup
         bg_path, is_video = get_reel_background(data.get("search_query", "dark rain"))
-        
         if bg_path and is_video:
             bg_clip = VideoFileClip(bg_path).subclip(0, duration).resize(height=1920)
             if bg_clip.w < 1080: bg_clip = bg_clip.resize(width=1080)
@@ -404,19 +401,8 @@ def create_reel_video(data: dict, poet: dict, tts_paths: list) -> str:
             clean_bg.save(clean_bg_path)
             bg_clip = ImageClip(clean_bg_path, duration=duration)
 
-        # 3. Audio Layering (Voice + Background Music)
-        music_dir = "music"
-        final_audio = tts_audio
-        if os.path.exists(music_dir):
-            tracks = [os.path.join(music_dir, f) for f in os.listdir(music_dir) if f.endswith(".mp3")]
-            if tracks:
-                music = AudioFileClip(random.choice(tracks)).subclip(0, duration).volumex(0.15)
-                final_audio = CompositeAudioClip([tts_audio.volumex(1.0), music])
-
-        # 4. Transparent Text Overlay Layer
         overlay_img = Image.new("RGBA", (1080, 1920), (0,0,0,0))
         draw = ImageDraw.Draw(overlay_img)
-        
         try:
             font_hook = ImageFont.truetype(FONT_ITALIC, 32)
             font_sher = ImageFont.truetype(FONT_SERIF, 48)
@@ -424,118 +410,101 @@ def create_reel_video(data: dict, poet: dict, tts_paths: list) -> str:
         except:
             font_hook = font_sher = font_poet = ImageFont.load_default()
 
-        # Draw Hook
         hook_text = textwrap.fill(data.get("hook", ""), width=32)
         draw.text((540, 380), hook_text, font=font_hook, fill="#E0E0E0", anchor="mm", align="center")
 
-        # Draw Sher (Text wrapped for mobile boundaries)
         sher_lines = data["sher_roman"].strip().split("\n")
         wrapped_lines = []
-        for line in sher_lines:
-            wrapped_lines.extend(textwrap.wrap(line, width=30)) 
-        
+        for line in sher_lines: wrapped_lines.extend(textwrap.wrap(line, width=30))
         final_sher_text = "\n".join(wrapped_lines)
         draw.text((540, 960), final_sher_text, font=font_sher, fill="#FFFFFF", anchor="mm", align="center", spacing=24)
-
-        # Draw Poet & Brand
         draw.text((540, 1400), f"-- {poet['name']} --", font=font_poet, fill="#C0A060", anchor="mm")
         draw.text((540, 1750), IG_HANDLE, font=font_poet, fill="#888888", anchor="mm")
 
         overlay_fname = f"output/overlay_{int(time.time())}.png"
         overlay_img.save(overlay_fname)
-
         txt_clip = ImageClip(overlay_fname, duration=duration)
 
-        # 5. Composite Final Video
-        final_video = CompositeVideoClip([bg_clip, txt_clip]).set_audio(final_audio)
+        final_video = CompositeVideoClip([bg_clip, txt_clip]).set_audio(tts_audio)
         reel_path = f"output/reel_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        
         final_video.write_videofile(reel_path, fps=24, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-        print(f"✅ Reel video created: {reel_path}")
         return reel_path
-
     except Exception as e:
         print(f"❌ Video render failure: {e}")
         return None
 
 # ============================================================
-# STEP 6: Media Hosting & Instagram Publishing
+# DUAL-HOST MEDIA UPLOADER
 # ============================================================
 def upload_public_media(path: str) -> str:
-    print(f"☁️ Hosting public media file: {path}...")
-    if MEDIA_HOST == "cloudinary" and CLOUDINARY_URL:
-        parsed = urlparse(CLOUDINARY_URL)
-        endpoint = f"https://api.cloudinary.com/v1_1/{parsed.hostname}/auto/upload"
+    print(f"☁️ [1/2] Uploading to Primary Host (tmpfiles.org)...")
+    try:
         with open(path, "rb") as f:
-            res = requests.post(endpoint, files={"file": f}, data={"folder": "shayari"}, auth=(parsed.username, parsed.password)).json()
-            url = res.get("secure_url")
-            print(f"✅ Uploaded to Cloudinary: {url}")
-            return url
-    else:
-        with open(path, "rb") as f:
-            res = requests.post("https://tempfile.org/api/upload/local", files={"files": (os.path.basename(path), f)}).json()
-            if res.get("success"):
-                url = f"{res['files'][0]['url'].rstrip('/')}/download"
-                print(f"✅ Uploaded to TempFile: {url}")
+            res = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f}, timeout=60)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("status") == "success":
+                url = data["data"]["url"].replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                print(f"✅ Hosted securely at: {url}")
                 return url
-    raise RuntimeError("Public media upload failed.")
+        print(f"⚠️ Primary Host Failed (Status: {res.status_code})")
+    except Exception as e:
+        print(f"⚠️ Primary Host Exception: {e}")
 
+    print(f"☁️ [2/2] Uploading to Fallback Host (tempfile.org)...")
+    try:
+       with open(path, "rb") as f:
+            res = requests.post("https://tempfile.org/api/upload/local", files={"files": (os.path.basename(path), f)}, timeout=60)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("success"):
+                url = f"{data['files'][0]['url'].rstrip('/')}/download"
+                print(f"✅ Hosted securely at: {url}")
+                return url
+        print(f"⚠️ Fallback Host Failed (Status: {res.status_code})")
+    except Exception as e:
+        print(f"⚠️ Fallback Host Exception: {e}")
+        
+    raise RuntimeError("All public media hosts failed to return a valid URL.")
+
+# ============================================================
+# INSTAGRAM PUBLISHER
+# ============================================================
 def post_to_instagram(media_path: str, caption: str, is_video: bool = False) -> bool:
     try:
         media_url = upload_public_media(media_path)
-
-        payload = {
-            "access_token": INSTAGRAM_ACCESS_TOKEN,
-            "caption": caption
-        }
+        payload = {"access_token": INSTAGRAM_ACCESS_TOKEN, "caption": caption}
         if is_video:
             payload["media_type"] = "REELS"
             payload["video_url"] = media_url
         else:
             payload["image_url"] = media_url
 
-        print("📡 Creating Instagram Media Container...")
         c_res = requests.post(f"https://graph.instagram.com/v21.0/{INSTAGRAM_USER_ID}/media", data=payload).json()
         container_id = c_res.get("id")
-        
-        if not container_id:
-            print(f"❌ Instagram Container Error: {c_res}")
+        if not container_id: 
+            print(f"❌ Instagram Error: {c_res}")
             return False
 
         if is_video:
-            print("⏳ Polling Instagram Reels processing status...")
             for attempt in range(1, 21):
                 time.sleep(10)
                 status = requests.get(f"https://graph.instagram.com/v21.0/{container_id}?fields=status_code&access_token={INSTAGRAM_ACCESS_TOKEN}").json()
-                code = status.get("status_code")
-                print(f"   [{attempt}/20] Status: {code}")
-                if code == "FINISHED":
-                    break
-                elif code == "ERROR":
-                    print("❌ Instagram Video Processing Failed.")
-                    return False
+                if status.get("status_code") == "FINISHED": break
+                elif status.get("status_code") == "ERROR": return False
         else:
-            # FIX: High-res photos take a few seconds to process. Wait before publishing.
-            print("⏳ Waiting 15 seconds for Instagram to process the high-res photo...")
             time.sleep(15)
 
-        print("📤 Publishing to Instagram...")
         p_res = requests.post(f"https://graph.instagram.com/v21.0/{INSTAGRAM_USER_ID}/media_publish", data={"creation_id": container_id, "access_token": INSTAGRAM_ACCESS_TOKEN}).json()
-        if "id" in p_res:
-            print(f"🎉 Published Successfully! Instagram Post ID: {p_res['id']}")
-            return True
-        else:
-            print(f"❌ Instagram Publish Error: {p_res}")
-            return False
-
-    except Exception as e:
-        print(f"❌ Instagram API Failure: {e}")
-        return False
+        return "id" in p_res
         
+    except RuntimeError as re:
+        print(f"❌ Media Upload Error: {re}")
+        return False
+    except Exception as e:
+        print(f"❌ Instagram Graph API Failure: {e}")
+        return False
 
-# ============================================================
-# STATE TRACKING
-# ============================================================
 def load_progress() -> dict:
     if os.path.exists("progress.json"):
         with open("progress.json") as f: return json.load(f)
@@ -544,55 +513,33 @@ def load_progress() -> dict:
 def save_progress(p: dict):
     with open("progress.json", "w") as f: json.dump(p, f, indent=2)
 
-# ============================================================
-# ============================================================
-# MAIN EXECUTION
-# ============================================================
 def run():
     validate_environment()
     p = load_progress()
     poet = POET_SCHEDULE[p["poet_index"] % len(POET_SCHEDULE)]
 
-    print(f"\n=======================================================")
-    print(f"🚀 STARTING WORKFLOW: [{POST_TYPE.upper()}] for {poet['name']}")
-    print(f"=======================================================\n")
-
+    print(f"\n🚀 STARTING WORKFLOW: [{POST_TYPE.upper()}] for {poet['name']}\n")
     data = generate_content(poet)
-
-    hook_str = data.get("hook") or ""
-    caption = f"{hook_str}\n\n{data['sher_roman']}\n\n-- {poet['name']}\n\n{data.get('caption','')}\n\n#urdushayari #hindishayari #poetry #relatable"
+    caption = f"{data.get('hook','')}\n\n{data['sher_roman']}\n\n-- {poet['name']}\n\n{data.get('caption','')}\n\n#urdushayari #hindishayari #poetry"
 
     success = False
-
     if POST_TYPE == "photo":
         img_path = create_photo_image(data, poet)
         success = post_to_instagram(img_path, caption, is_video=False)
-        if success:
-            p["poet_index"] += 1
-
+        if success: p["poet_index"] += 1
     elif POST_TYPE == "reel":
         os.makedirs("output", exist_ok=True)
-        
         tts_paths = generate_tts(data)
-        
-        if not tts_paths:
-            print("❌ FATAL: TTS audio failed. Exiting.")
-            sys.exit(1)
-
+        if not tts_paths: sys.exit(1)
         reel_path = create_reel_video(data, poet, tts_paths)
-        
-        if reel_path:
-            success = post_to_instagram(reel_path, caption, is_video=True)
-        else:
-            print("❌ FATAL: Reel video rendering failed.")
-            sys.exit(1)
+        if reel_path: success = post_to_instagram(reel_path, caption, is_video=True)
+        else: sys.exit(1)
 
     if success:
         p["total_posts"] += 1
         save_progress(p)
         print("\n✅ WORKFLOW COMPLETED SUCCESSFULLY!")
     else:
-        print("\n❌ WORKFLOW FAILED TO POST TO INSTAGRAM.")
         sys.exit(1)
 
 if __name__ == "__main__":
