@@ -312,54 +312,82 @@ def generate_content(poet: dict, used_shers: list = None) -> dict:
         '  "caption": "..."\n'
         "}"
     )
+    import re
 
+    # Tier 1 & 2: Gemini (Argon -> 3.8 Flash)
     if GEMINI_API_KEY:
-        try:
-            print(f"🧠 [1/4] Querying Gemini AI for poet: {poet['name']}...")
-            client = genai.Client(
-                api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(
-                    retry_options=types.HttpRetryOptions(attempts=1)
+        gemini_models = ["gemini-4-argon", "gemini-3.8-flash"]
+        client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(attempts=1)
+            )
+        )
+        for idx, g_model in enumerate(gemini_models, start=1):
+            try:
+                print(f"🧠 [{idx}/5] Querying Gemini ({g_model}) for poet: {poet['name']}...")
+                response = client.models.generate_content(
+                    model=g_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(temperature=0.7)
                 )
-            )
-            response = client.models.generate_content(
-                model="gemini-3.5-flash", 
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.7)
-            )
-            raw = response.text.strip().replace("```json","").replace("```","").strip()
-            data = normalize_content(json.loads(raw), poet)
-            print("✅ Generated and validated content via Gemini!")
-            return data
-        except Exception as e:
-            print(f"⚠️ Gemini failed ({e}). Moving to Fallback Chain...")
+                raw = response.text.strip()
+                match = re.search(r'\{.*\}', raw, re.DOTALL)
+                if not match:
+                    raise ValueError("No JSON object found in Gemini response.")
+                data = json.loads(match.group(0))
+                print(f"✅ Generated Sher successfully via {g_model}!")
+                return data
+            except Exception as e:
+                print(f"⚠️ {g_model} failed ({e}). Moving to next model...")
 
+    # Tier 3, 4 & 5: External Fallbacks
     fallbacks = [
-        {"name": "OpenRouter", "api_key": OPENROUTER_API_KEY, "base_url": "https://openrouter.ai/api/v1", "model": "openrouter/free"},
-        {"name": "Groq", "api_key": GROQ_API_KEY, "base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
-        {"name": "NVIDIA NIM", "api_key": NVIDIA_API_KEY, "base_url": "https://integrate.api.nvidia.com/v1", "model": "meta/llama-3.1-70b-instruct"}
+        {
+            "name": "OpenRouter", 
+            "api_key": OPENROUTER_API_KEY, 
+            "base_url": "https://openrouter.ai/api/v1", 
+            "model": "meta-llama/llama-3.1-8b-instruct:free"
+        },
+        {
+            "name": "Groq", 
+            "api_key": GROQ_API_KEY, 
+            "base_url": "https://api.groq.com/openai/v1", 
+            "model": "llama-3.1-70b-versatile"
+        },
+        {
+            "name": "NVIDIA NIM", 
+            "api_key": NVIDIA_API_KEY, 
+            "base_url": "https://integrate.api.nvidia.com/v1", 
+            "model": "nvidia/llama-3.1-nemotron-70b-instruct"
+        }
     ]
 
-    for index, provider in enumerate(fallbacks, start=2):
+    for index, provider in enumerate(fallbacks, start=3):
         if not provider["api_key"]:
             continue
         try:
-            print(f"🔄 [{index}/4] Trying {provider['name']} Fallback...")
+            print(f"🔄 [{index}/5] Trying {provider['name']} Fallback...")
             client = OpenAI(base_url=provider["base_url"], api_key=provider["api_key"])
             response = client.chat.completions.create(
                 model=provider["model"],
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7
             )
-            raw = response.choices[0].message.content.strip().replace("```json","").replace("```","").strip()
-            data = normalize_content(json.loads(raw), poet)
-            print(f"✅ Generated and validated content via {provider['name']}!")
+            raw = response.choices[0].message.content.strip()
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON object found in the AI response.")
+            data = json.loads(match.group(0))
+            print(f"✅ Generated Sher successfully via {provider['name']}!")
             return data
         except Exception as err:
             print(f"⚠️ {provider['name']} failed: {err}")
 
-    print("❌ FATAL: All AI providers failed.")
+    print("❌ FATAL: All 5 AI tiers failed.")
     sys.exit(1)
+
+
 
 def normalize_content(data: dict, poet: dict) -> dict:
     """Validate and normalize model output before it reaches the renderer."""
